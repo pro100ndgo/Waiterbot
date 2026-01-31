@@ -2,7 +2,23 @@ import sqlite3
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, executor, types
 
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+
 TOKEN = "8508671917:AAFp0IeiX_9vkRj6Nv6bTa0_wVl-OhY6I0E"
+
+menu = ReplyKeyboardMarkup(resize_keyboard=True)
+menu.add(
+    KeyboardButton("📊 Bugungi hisobot"),
+    KeyboardButton("📅 3 kunlik hisobot")
+)
+menu.add(
+    KeyboardButton("📆 Haftalik hisobot"),
+    KeyboardButton("🏆 TOP")
+)
+menu.add(
+    KeyboardButton("⚙️ Sozlamalar")
+)
+
 
 bot = Bot(TOKEN)
 dp = Dispatcher(bot)
@@ -99,6 +115,29 @@ async def report(msg: types.Message):
         f"📊 Foiz: {bonus:,}\n"
         f"✅ Jami: {final:,}"
     )
+
+@dp.message_handler(lambda m: m.text == "📊 Bugungi hisobot")
+async def today_report(msg: types.Message):
+    await report(msg)
+
+@dp.message_handler(lambda m: m.text == "📅 3 kunlik hisobot")
+async def three_day_report(msg: types.Message):
+    msg.text = "/hisobot 3"
+    await report(msg)
+
+@dp.message_handler(lambda m: m.text == "📆 Haftalik hisobot")
+async def week_report(msg: types.Message):
+    msg.text = "/hisobot 7"
+    await report(msg)
+
+@dp.message_handler(lambda m: m.text == "⚙️ Sozlamalar")
+async def settings(msg: types.Message):
+    await msg.answer(
+        "⚙️ Sozlamalar:\n"
+        "/start — qayta sozlash\n"
+        "Fixed yoki foizni o‘zgartirish keyin qo‘shiladi"
+    )
+
 
 if __name__ == "__main__":
     executor.start_polling(dp)
