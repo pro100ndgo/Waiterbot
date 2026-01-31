@@ -2,7 +2,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, executor, types
 
-TOKEN = "TOKEN_BU_YERGA"
+TOKEN = "8508671917:AAFp0IeiX_9vkRj6Nv6bTa0_wVl-OhY6I0E"
 
 bot = Bot(TOKEN)
 dp = Dispatcher(bot)
