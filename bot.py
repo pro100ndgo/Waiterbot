@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
-TOKEN = os.getenv("8508671917:AAFp0IeiX_9vkRj6Nv6bTa0_wVl-OhY6I0E")
+TOKEN = os.getenv("TOKEN")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
