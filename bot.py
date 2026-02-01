@@ -1,18 +1,20 @@
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta
+
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import (
-    ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
-)
+from aiogram.types import ReplyKeyboardMarkup
 
 # ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
+MIN_AMOUNT = 10000  # 10 mingdan kichik summa olinmaydi
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
 # ================= DATABASE =================
-conn = sqlite3.connect("data.db")
+conn = sqlite3.connect("data.db", check_same_thread=False)
 cur = conn.cursor()
 
 cur.execute("""
@@ -31,35 +33,28 @@ CREATE TABLE IF NOT EXISTS sales (
     group_id INTEGER,
     user_id INTEGER,
     amount INTEGER,
-    date TEXT
+    date TEXT,
+    work_week TEXT
 )
 """)
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS days_off (
-    user_id INTEGER,
-    weekday INTEGER
-)
-""")
 conn.commit()
 
 # ================= MEMORY =================
-user_step = {}          # registration steps
-bot_messages = {}       # last 2 bot messages
+user_step = {}
+bot_messages = {}
 
 # ================= HELPERS =================
 async def send_clean(msg, text, reply_markup=None):
     uid = msg.from_user.id
-
-    # user xabarini o‘chirish
     try:
         await bot.delete_message(msg.chat.id, msg.message_id)
     except:
         pass
 
     sent = await msg.answer(text, reply_markup=reply_markup)
-
     bot_messages.setdefault(uid, []).append(sent.message_id)
+
     if len(bot_messages[uid]) > 2:
         old = bot_messages[uid].pop(0)
         try:
@@ -71,221 +66,208 @@ def main_menu():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("📊 Bugungi hisobot", "📅 3 kunlik hisobot")
     kb.add("📆 Haftalik hisobot", "🏆 TOP")
-    kb.add("📊 Grafik", "⚙️ Sozlamalar")
+    kb.add("⚙️ Sozlamalar")
     return kb
 
-def branch_kb():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add("🏢 AKSU Shedevr", "🏢 AKSU Chigatoy")
-    return kb
+# ================= ISH HAFTASI =================
+def get_work_week(dt: datetime):
+    # Juma 23:30 dan keyin — yangi hafta
+    if dt.weekday() == 4 and (dt.hour > 23 or (dt.hour == 23 and dt.minute >= 30)):
+        dt += timedelta(days=1)
 
-def fixed_kb():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add("120000", "150000", "170000")
-    return kb
+    # Shanba — hafta boshi
+    days_from_saturday = (dt.weekday() - 5) % 7
+    week_start = dt - timedelta(days=days_from_saturday)
 
-def percent_kb():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add("0.7", "1", "3", "5")
-    return kb
+    year, week, _ = week_start.isocalendar()
+    return f"{year}-W{week:02d}"
 
-def build_graph_kb(user_id):
-    days = ["Dushanba", "Seshanba", "Chorshanba",
-            "Payshanba", "Juma", "Shanba", "Yakshanba"]
-    kb = InlineKeyboardMarkup(row_width=2)
-
-    for i, d in enumerate(days):
-        cur.execute(
-            "SELECT 1 FROM days_off WHERE user_id=? AND weekday=?",
-            (user_id, i)
-        )
-        emoji = "🔴" if cur.fetchone() else "🟢"
-        kb.insert(
-            InlineKeyboardButton(f"{emoji} {d}", callback_data=f"day_{i}")
-        )
-
-    kb.add(InlineKeyboardButton("⬅️ Ortga", callback_data="graph_back"))
-    return kb
-
-# ================= START =================
+# ================= START + BANNER =================
 @dp.message_handler(commands=["start"])
 async def start(msg: types.Message):
-    cur.execute("SELECT name FROM users WHERE user_id=?", (msg.from_user.id,))
-    row = cur.fetchone()
+    banner = (
+        "💼 Ushbu bot ofitsiantlar ish haqqini hisoblash kalkulyatori\n"
+        "maqsadida foydalanish uchun yaratilgan.\n\n"
+        "by: @Shakhzod_2105"
+    )
 
-    if row:
-        await send_clean(
-            msg,
-            f"👋 Xush kelibsan, {row[0]}!",
-            main_menu()
-        )
+    cur.execute("SELECT name FROM users WHERE user_id=?", (msg.from_user.id,))
+    u = cur.fetchone()
+
+    if u:
+        await send_clean(msg, f"{banner}\n\n👋 Xush kelibsan, {u[0]}!", main_menu())
     else:
         user_step[msg.from_user.id] = "name"
-        await send_clean(msg, "👤 Isming nima?")
+        await send_clean(msg, f"{banner}\n\n👤 Isming nima?")
 
 # ================= REGISTRATION =================
 @dp.message_handler(lambda m: user_step.get(m.from_user.id) == "name")
-async def step_name(msg):
+async def reg_name(msg):
     cur.execute(
-        "INSERT OR IGNORE INTO users(user_id, name) VALUES (?,?)",
+        "INSERT OR IGNORE INTO users (user_id, name) VALUES (?,?)",
         (msg.from_user.id, msg.text)
     )
     conn.commit()
+
     user_step[msg.from_user.id] = "branch"
-    await send_clean(msg, "🏢 Filialni tanla:", branch_kb())
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add("🏢 AKSU Shedevr", "🏢 AKSU Chigatoy")
+    await send_clean(msg, "🏢 Filialni tanla:", kb)
 
 @dp.message_handler(lambda m: user_step.get(m.from_user.id) == "branch")
-async def step_branch(msg):
+async def reg_branch(msg):
     cur.execute(
         "UPDATE users SET branch=? WHERE user_id=?",
         (msg.text, msg.from_user.id)
     )
     conn.commit()
+
     user_step[msg.from_user.id] = "fixed"
-    await send_clean(msg, "💼 Fixed ish haqqini tanla:", fixed_kb())
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add("120000", "150000", "170000")
+    await send_clean(msg, "💼 Fixed ish haqqi:", kb)
 
 @dp.message_handler(lambda m: user_step.get(m.from_user.id) == "fixed")
-async def step_fixed(msg):
+async def reg_fixed(msg):
     cur.execute(
         "UPDATE users SET fixed=? WHERE user_id=?",
         (int(msg.text), msg.from_user.id)
     )
     conn.commit()
+
     user_step[msg.from_user.id] = "percent"
-    await send_clean(msg, "📊 Foizni tanla:", percent_kb())
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add("0.7", "1", "3", "5")
+    await send_clean(msg, "📊 Foizni tanla:", kb)
 
 @dp.message_handler(lambda m: user_step.get(m.from_user.id) == "percent")
-async def step_percent(msg):
+async def reg_percent(msg):
     percent_map = {"0.7": 0.007, "1": 0.01, "3": 0.03, "5": 0.05}
     cur.execute(
         "UPDATE users SET percent=? WHERE user_id=?",
         (percent_map[msg.text], msg.from_user.id)
     )
     conn.commit()
-    user_step.pop(msg.from_user.id)
-    await send_clean(msg, "✅ Profil saqlandi!", main_menu())
 
-# ================= GROUP SALES =================
-@dp.message_handler(lambda m: m.text.isdigit())
-async def save_sale(msg):
-    if msg.chat.type in ["group", "supergroup"]:
-        cur.execute(
-            "INSERT INTO sales VALUES (?,?,?,?)",
-            (msg.chat.id, msg.from_user.id, int(msg.text),
-             datetime.now().strftime("%Y-%m-%d"))
+    user_step.pop(msg.from_user.id)
+    await send_clean(msg, "✅ Profil tayyor!", main_menu())
+
+# ================= SAVE SALES (GROUP) =================
+@dp.message_handler(lambda m: m.chat.type in ["group", "supergroup"] and m.text)
+async def save_sale(msg: types.Message):
+    text = msg.text.strip()
+    amount = None
+
+    # Faqat Итого / Jami
+    match = re.search(
+        r"(Итого|ИТОГО|Итог|Jami)\s*[:\-]?\s*([\d\s]+)",
+        text,
+        re.IGNORECASE
+    )
+    if match:
+        amount = int(match.group(2).replace(" ", ""))
+
+    # Yoki faqat toza raqam
+    if amount is None:
+        clean = text.replace(" ", "")
+        if clean.isdigit():
+            amount = int(clean)
+
+    if not amount or amount < MIN_AMOUNT:
+        return
+
+    now = datetime.now()
+    work_week = get_work_week(now)
+
+    cur.execute(
+        "INSERT INTO sales VALUES (?,?,?,?,?)",
+        (
+            msg.chat.id,
+            msg.from_user.id,
+            amount,
+            now.strftime("%Y-%m-%d"),
+            work_week
         )
-        conn.commit()
+    )
+    conn.commit()
 
 # ================= REPORTS =================
-def working_days(uid, days_back):
-    c = 0
-    for i in range(days_back):
-        d = datetime.now() - timedelta(days=i)
-        cur.execute(
-            "SELECT 1 FROM days_off WHERE user_id=? AND weekday=?",
-            (uid, d.weekday())
-        )
-        if not cur.fetchone():
-            c += 1
-    return c
+async def send_report(msg, mode):
+    uid = msg.from_user.id
+    now = datetime.now()
 
-async def report(msg, days_back):
-    since = (datetime.now() - timedelta(days=days_back-1)).strftime("%Y-%m-%d")
+    if mode == "today":
+        where = "date=?"
+        params = (now.strftime("%Y-%m-%d"),)
+        title = "📊 Bugungi hisobot"
+    elif mode == "3days":
+        since = (now - timedelta(days=2)).strftime("%Y-%m-%d")
+        where = "date>=?"
+        params = (since,)
+        title = "📅 3 kunlik hisobot"
+    else:
+        ww = get_work_week(now)
+        where = "work_week=?"
+        params = (ww,)
+        title = "📆 Haftalik hisobot"
+
     cur.execute(
-        "SELECT SUM(amount) FROM sales WHERE user_id=? AND date>=?",
-        (msg.from_user.id, since)
+        f"SELECT SUM(amount) FROM sales WHERE user_id=? AND {where}",
+        (uid, *params)
     )
     total = cur.fetchone()[0] or 0
 
     cur.execute(
         "SELECT name, fixed, percent FROM users WHERE user_id=?",
-        (msg.from_user.id,)
+        (uid,)
     )
     name, fixed, percent = cur.fetchone()
 
-    fixed_sum = fixed * working_days(msg.from_user.id, days_back)
     bonus = int(total * percent)
-    jami = fixed_sum + bonus
+    jami = fixed + bonus
 
     await send_clean(
         msg,
+        f"{title}\n\n"
         f"👤 {name}\n"
         f"💰 Savdo: {total:,} UZS\n"
-        f"💼 Fixed: {fixed_sum:,} UZS\n"
         f"📊 Foiz: {bonus:,} UZS\n"
+        f"💼 Fixed: {fixed:,} UZS\n"
         f"✅ Jami: {jami:,} UZS",
         main_menu()
     )
 
 @dp.message_handler(lambda m: m.text == "📊 Bugungi hisobot")
-async def r1(msg): await report(msg, 1)
+async def r_today(msg): await send_report(msg, "today")
 
 @dp.message_handler(lambda m: m.text == "📅 3 kunlik hisobot")
-async def r3(msg): await report(msg, 3)
+async def r_3(msg): await send_report(msg, "3days")
 
 @dp.message_handler(lambda m: m.text == "📆 Haftalik hisobot")
-async def r7(msg): await report(msg, 7)
-
-# ================= GRAPH =================
-@dp.message_handler(lambda m: m.text == "📊 Grafik")
-async def graph(msg):
-    await send_clean(
-        msg,
-        "📊 Ish / Dam kunlarini belgila:",
-        build_graph_kb(msg.from_user.id)
-    )
-
-@dp.callback_query_handler(lambda c: c.data.startswith("day_"))
-async def toggle_day(c):
-    d = int(c.data.split("_")[1])
-    cur.execute(
-        "SELECT 1 FROM days_off WHERE user_id=? AND weekday=?",
-        (c.from_user.id, d)
-    )
-    if cur.fetchone():
-        cur.execute(
-            "DELETE FROM days_off WHERE user_id=? AND weekday=?",
-            (c.from_user.id, d)
-        )
-    else:
-        cur.execute(
-            "INSERT INTO days_off VALUES (?,?)",
-            (c.from_user.id, d)
-        )
-    conn.commit()
-
-    await c.message.edit_reply_markup(
-        reply_markup=build_graph_kb(c.from_user.id)
-    )
-    await c.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "graph_back")
-async def graph_back(c):
-    await c.message.edit_text("⬅️ Menyu", reply_markup=main_menu())
-    await c.answer()
+async def r_week(msg): await send_report(msg, "weekly")
 
 # ================= LEADERBOARD =================
 @dp.message_handler(lambda m: m.text == "🏆 TOP")
-async def top(msg):
-    today = datetime.now().strftime("%Y-%m-%d")
+async def leaderboard(msg):
+    ww = get_work_week(datetime.now())
     cur.execute("""
-    SELECT u.name, u.branch, SUM(s.amount)
-    FROM sales s
-    JOIN users u ON u.user_id=s.user_id
-    WHERE s.date=? AND u.show_in_leaderboard=1
-    GROUP BY s.user_id
-    ORDER BY SUM(s.amount) DESC
-    LIMIT 5
-    """, (today,))
+        SELECT u.name, u.branch, SUM(s.amount)
+        FROM sales s
+        JOIN users u ON u.user_id=s.user_id
+        WHERE s.work_week=? AND u.show_in_leaderboard=1
+        GROUP BY s.user_id
+        ORDER BY SUM(s.amount) DESC
+        LIMIT 5
+    """, (ww,))
     rows = cur.fetchall()
 
     if not rows:
-        await send_clean(msg, "Leaderboard bo‘sh.", main_menu())
+        await send_clean(msg, "🏆 Leaderboard bo‘sh.", main_menu())
         return
 
-    medals = ["🥇","🥈","🥉","4️⃣","5️⃣"]
-    text = "🏆 TOP 5\n\n"
-    for i,r in enumerate(rows):
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    text = "🏆 TOP 5 (joriy ish haftasi)\n\n"
+    for i, r in enumerate(rows):
         text += f"{medals[i]} {r[0]} ({r[1]}) — {r[2]:,} UZS\n"
 
     await send_clean(msg, text, main_menu())
@@ -302,13 +284,13 @@ async def settings(msg):
 
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("👁 Leaderboardni yoq/o‘chir")
+    kb.add("🔄 Qayta ro‘yxatdan o‘tish")
     kb.add("🗑 Barcha savdoni tozalash")
     kb.add("⬅️ Ortga")
 
     await send_clean(
         msg,
-        f"⚙️ Sozlamalar\n"
-        f"Leaderboard: {status}",
+        f"⚙️ Sozlamalar\nLeaderboard: {status}",
         kb
     )
 
@@ -321,11 +303,46 @@ async def toggle_lb(msg):
     conn.commit()
     await settings(msg)
 
+# ===== QAYTA RO‘YXATDAN O‘TISH =====
+@dp.message_handler(lambda m: m.text == "🔄 Qayta ro‘yxatdan o‘tish")
+async def re_register_confirm(msg):
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add("✅ Ha, qayta ro‘yxatdan o‘taman")
+    kb.add("❌ Yo‘q")
+
+    await send_clean(
+        msg,
+        "⚠️ Diqqat!\n\n"
+        "Qayta ro‘yxatdan o‘tsangiz:\n"
+        "• Profil butunlay o‘chadi\n"
+        "• Savdolar saqlanib qoladi\n\n"
+        "Davom etamizmi?",
+        kb
+    )
+
+@dp.message_handler(lambda m: m.text == "✅ Ha, qayta ro‘yxatdan o‘taman")
+async def re_register_yes(msg):
+    cur.execute("DELETE FROM users WHERE user_id=?", (msg.from_user.id,))
+    conn.commit()
+
+    user_step.pop(msg.from_user.id, None)
+    user_step[msg.from_user.id] = "name"
+
+    await send_clean(
+        msg,
+        "♻️ Qayta ro‘yxatdan o‘tish boshlandi.\n\n👤 Isming nima?"
+    )
+
+@dp.message_handler(lambda m: m.text == "❌ Yo‘q")
+async def re_register_no(msg):
+    await send_clean(msg, "⬅️ Bekor qilindi", main_menu())
+
+# ===== SAVDOLARINI TOZALASH =====
 @dp.message_handler(lambda m: m.text == "🗑 Barcha savdoni tozalash")
 async def reset_all(msg):
     cur.execute("DELETE FROM sales WHERE user_id=?", (msg.from_user.id,))
     conn.commit()
-    await send_clean(msg, "✅ Barcha savdolar tozalandi.", main_menu())
+    await send_clean(msg, "✅ Barcha savdolar o‘chirildi.", main_menu())
 
 @dp.message_handler(lambda m: m.text == "⬅️ Ortga")
 async def back(msg):
