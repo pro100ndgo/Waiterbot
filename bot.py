@@ -67,6 +67,24 @@ menu.add("📊 Bugungi hisobot", "📅 3 kunlik hisobot")
 menu.add("📆 Haftalik hisobot", "🏆 TOP")
 menu.add("📊 Grafik", "⚙️ Sozlamalar")
 
+@dp.message_handler(commands=["start"])
+async def start(msg: types.Message):
+    cur.execute("SELECT name FROM users WHERE user_id=?", (msg.from_user.id,))
+    row = cur.fetchone()
+
+    if row:
+        await send_clean(
+            msg,
+            f"👋 Xush kelibsan, {row[0]}!",
+            menu
+        )
+    else:
+        user_state[msg.from_user.id] = "name"
+        await send_clean(
+            msg,
+            "👤 Isming nima?"
+        )
+
 # ================= SETTINGS =================
 @dp.message_handler(lambda m: m.text == "⚙️ Sozlamalar")
 async def settings(msg):
