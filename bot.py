@@ -47,22 +47,39 @@ CREATE TABLE IF NOT EXISTS days_off (
 conn.commit()
 
 user_state = {}
-last_bot_message = {}
+last_bot_messages = {}  # user_id -> [msg_id1, msg_id2]
 
 # ================= HELPERS =================
 async def send_clean(msg, text, reply_markup=None):
     uid = msg.from_user.id
-    if uid in last_bot_message:
+
+    # foydalanuvchi yuborgan xabarni o‘chiramiz
+    try:
+        await bot.delete_message(msg.chat.id, msg.message_id)
+    except:
+        pass
+
+    sent = await msg.answer(text, reply_markup=reply_markup)
+
+    if uid not in last_bot_messages:
+        last_bot_messages[uid] = []
+
+    last_bot_messages[uid].append(sent.message_id)
+
+    # faqat oxirgi 2 ta bot xabari qoladi
+    if len(last_bot_messages[uid]) > 2:
+        old = last_bot_messages[uid].pop(0)
         try:
-            await bot.delete_message(msg.chat.id, last_bot_message[uid])
+            await bot.delete_message(msg.chat.id, old)
         except:
             pass
-    sent = await msg.answer(text, reply_markup=reply_markup)
-    last_bot_message[uid] = sent.message_id
+
 
 def build_graph_keyboard(user_id):
-    days = ["Dushanba", "Seshanba", "Chorshanba", "Payshanba", "Juma", "Shanba", "Yakshanba"]
+    days = ["Dushanba", "Seshanba", "Chorshanba",
+            "Payshanba", "Juma", "Shanba", "Yakshanba"]
     kb = InlineKeyboardMarkup(row_width=2)
+
     for i, d in enumerate(days):
         cur.execute(
             "SELECT 1 FROM days_off WHERE user_id=? AND weekday=?",
@@ -72,7 +89,10 @@ def build_graph_keyboard(user_id):
         kb.insert(
             InlineKeyboardButton(f"{emoji} {d}", callback_data=f"day_{i}")
         )
+
+    kb.add(InlineKeyboardButton("⬅️ Ortga", callback_data="graph_back"))
     return kb
+
 
 def working_days(user_id, days_back):
     cnt = 0
@@ -154,7 +174,7 @@ async def reg_percent(msg):
     user_state.pop(msg.from_user.id)
     await send_clean(msg, "✅ Profil saqlandi!", menu)
 
-# ================= SAVE SALES =================
+# ================= SAVE SALES (GROUP) =================
 @dp.message_handler(lambda m: m.text and m.text.isdigit())
 async def save_sale(msg):
     if msg.chat.type in ["group", "supergroup"]:
@@ -205,7 +225,7 @@ async def three(msg): await send_report(msg, 3)
 @dp.message_handler(lambda m: m.text == "📆 Haftalik hisobot")
 async def week(msg): await send_report(msg, 7)
 
-# ================= GRAPH (DAM KUNLARI) =================
+# ================= GRAPH =================
 @dp.message_handler(lambda m: m.text == "📊 Grafik")
 async def open_graph(msg):
     await send_clean(
@@ -232,9 +252,15 @@ async def toggle_day(call):
             (call.from_user.id, d)
         )
     conn.commit()
+
     await call.message.edit_reply_markup(
         reply_markup=build_graph_keyboard(call.from_user.id)
     )
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "graph_back")
+async def graph_back(call):
+    await call.message.edit_text("⬅️ Menyu", reply_markup=menu)
     await call.answer()
 
 # ================= LEADERBOARD =================
@@ -242,12 +268,12 @@ async def toggle_day(call):
 async def top(msg):
     today = datetime.now().strftime("%Y-%m-%d")
     cur.execute("""
-    SELECT u.name, u.branch, SUM(s.amount) total
+    SELECT u.name, u.branch, SUM(s.amount)
     FROM sales s
     JOIN users u ON u.user_id = s.user_id
     WHERE s.date=?
     GROUP BY s.user_id
-    ORDER BY total DESC
+    ORDER BY SUM(s.amount) DESC
     LIMIT ?
     """, (today, TOP_LIMIT))
     rows = cur.fetchall()
@@ -266,10 +292,7 @@ async def top(msg):
 # ================= SETTINGS =================
 @dp.message_handler(lambda m: m.text == "⚙️ Sozlamalar")
 async def settings(msg):
-    cur.execute(
-        "SELECT 1 FROM sales WHERE user_id=? LIMIT 1",
-        (msg.from_user.id,)
-    )
+    cur.execute("SELECT 1 FROM sales WHERE user_id=? LIMIT 1", (msg.from_user.id,))
     status = "✅ Ulangan" if cur.fetchone() else "❌ Ulanmagan"
 
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -320,8 +343,7 @@ async def back(msg):
 async def tips(msg):
     await send_clean(
         msg,
-        "📢 Ofitsantlar uchun maslahatlar\n"
-        "⏳ Kanal tez kunda ishga tushadi!",
+        "📢 Ofitsantlar uchun maslahatlar\n⏳ Kanal tez kunda ishga tushadi!",
         menu
     )
 
@@ -329,9 +351,7 @@ async def tips(msg):
 async def donate(msg):
     await send_clean(
         msg,
-        "❤️ Bot foydali bo‘lsa, qo‘llab-quvvatlang:\n\n"
-        "⭐ Telegram Stars\n"
-        "💳 Click / Payme",
+        "❤️ Bot foydali bo‘lsa qo‘llab-quvvatlang:\n⭐ Telegram Stars\n💳 Click / Payme",
         menu
     )
 
