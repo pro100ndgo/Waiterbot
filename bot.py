@@ -1,236 +1,248 @@
 import os
+import re
 import sqlite3
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import (
+    ReplyKeyboardMarkup,
     InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    ReplyKeyboardMarkup
+    InlineKeyboardButton
 )
 
 # ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
-TZ = timezone(timedelta(hours=5))  # Toshkent vaqti
+MIN_AMOUNT = 10000
+TZ = timezone(timedelta(hours=5))  # Toshkent vaqti GMT+5
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
 # ================= DATABASE =================
-db = sqlite3.connect("data.db", check_same_thread=False)
-cur = db.cursor()
+conn = sqlite3.connect("data.db", check_same_thread=False)
+cur = conn.cursor()
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     name TEXT,
+    branch TEXT,
     fixed INTEGER,
     percent REAL,
-    dashboard_msg INTEGER
+    show_in_leaderboard INTEGER DEFAULT 1
 )
 """)
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS sales (
+    chat_id INTEGER,
     user_id INTEGER,
     amount INTEGER,
-    date TEXT
+    date TEXT,
+    work_week TEXT
 )
 """)
 
-db.commit()
+cur.execute("""
+CREATE TABLE IF NOT EXISTS workdays (
+    user_id INTEGER,
+    day INTEGER,
+    is_work INTEGER,
+    PRIMARY KEY (user_id, day)
+)
+""")
 
-# ================= STATES =================
-user_state = {}
+conn.commit()
 
-# ================= KEYBOARDS =================
-def kb_main():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("📊 Bugun", callback_data="today"),
-        InlineKeyboardButton("📆 Haftalik", callback_data="week"),
-        InlineKeyboardButton("📈 Grafik", callback_data="graph"),
-        InlineKeyboardButton("⚙️ Sozlamalar", callback_data="settings"),
-    )
-    return kb
+# ================= MEMORY =================
+user_step = {}
+bot_messages = {}
 
-def kb_fixed():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("120 000", callback_data="fixed_120000"),
-        InlineKeyboardButton("150 000", callback_data="fixed_150000"),
-        InlineKeyboardButton("170 000", callback_data="fixed_170000"),
-    )
-    return kb
-
-def kb_percent():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("0.7 %", callback_data="percent_0.7"),
-        InlineKeyboardButton("1 %", callback_data="percent_1"),
-        InlineKeyboardButton("3 %", callback_data="percent_3"),
-        InlineKeyboardButton("5 %", callback_data="percent_5"),
-    )
-    return kb
-
-def kb_settings():
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        InlineKeyboardButton("🔄 Hisobni tozalash", callback_data="reset"),
-        InlineKeyboardButton("🔁 Qayta ro‘yxatdan o‘tish", callback_data="rereg"),
-        InlineKeyboardButton("⬅️ Ortga", callback_data="back"),
-    )
-    return kb
-
-# ================= START =================
-@dp.message_handler(commands=["start"])
-async def start(msg: types.Message):
-    cur.execute("SELECT dashboard_msg FROM users WHERE user_id=?", (msg.from_user.id,))
-    user = cur.fetchone()
-
-    if user:
-        await show_dashboard(msg.from_user.id, msg.chat.id)
-        return
-
-    user_state[msg.from_user.id] = "name"
-    await msg.answer(
-        "👋 Xush kelibsiz!\n\n"
-        "Bu bot ofitsiantlar ish haqqini hisoblash uchun.\n\n"
-        "Boshlash uchun ismingizni yozing:"
+# ================= HELPERS =================
+def remove_strikethrough(text: str) -> str:
+    # Unicode combining (ustiga chizish) belgilarni O‘CHIRADI
+    return "".join(
+        ch for ch in text
+        if unicodedata.category(ch) != "Mn"
     )
 
-# ================= REGISTRATION =================
-@dp.message_handler(lambda m: user_state.get(m.from_user.id) == "name")
-async def reg_name(msg: types.Message):
-    cur.execute(
-        "INSERT OR REPLACE INTO users (user_id, name) VALUES (?,?)",
-        (msg.from_user.id, msg.text.strip())
-    )
-    db.commit()
-    user_state[msg.from_user.id] = "fixed"
+async def send_clean(msg, text, reply_markup=None):
+    uid = msg.from_user.id
+    try:
+        await bot.delete_message(msg.chat.id, msg.message_id)
+    except:
+        pass
 
-    await msg.answer("💼 Kunlik ish haqqini tanlang:", reply_markup=kb_fixed())
+    sent = await msg.answer(text, reply_markup=reply_markup)
+    bot_messages.setdefault(uid, []).append(sent.message_id)
 
-@dp.callback_query_handler(lambda c: c.data.startswith("fixed_"))
-async def reg_fixed(call: types.CallbackQuery):
-    fixed = int(call.data.split("_")[1])
-    cur.execute(
-        "UPDATE users SET fixed=? WHERE user_id=?",
-        (fixed, call.from_user.id)
-    )
-    db.commit()
-    user_state[call.from_user.id] = "percent"
-
-    await call.message.edit_text(
-        "📊 Savdodan olinadigan foizni tanlang:",
-        reply_markup=kb_percent()
-    )
-
-@dp.callback_query_handler(lambda c: c.data.startswith("percent_"))
-async def reg_percent(call: types.CallbackQuery):
-    percent = float(call.data.split("_")[1]) / 100
-    cur.execute(
-        "UPDATE users SET percent=? WHERE user_id=?",
-        (percent, call.from_user.id)
-    )
-    db.commit()
-    user_state.pop(call.from_user.id, None)
-
-    await show_dashboard(call.from_user.id, call.message.chat.id)
-
-# ================= DASHBOARD =================
-async def show_dashboard(user_id: int, chat_id: int):
-    now = datetime.now(TZ)
-    today = now.strftime("%Y-%m-%d")
-
-    cur.execute("SELECT fixed, percent, dashboard_msg FROM users WHERE user_id=?", (user_id,))
-    fixed, percent, dash_id = cur.fetchone()
-
-    cur.execute("SELECT SUM(amount) FROM sales WHERE user_id=? AND date=?", (user_id, today))
-    total = cur.fetchone()[0] or 0
-    bonus = int(total * percent)
-
-    text = (
-        "📊 <b>Bugungi hisobot</b>\n"
-        "━━━━━━━━━━━━━━\n"
-        f"📅 {now.strftime('%d.%m.%Y %H:%M')}\n\n"
-        f"💰 Savdo: <b>{total:,} UZS</b>\n"
-        f"📊 Foiz: <b>{bonus:,} UZS</b>\n"
-        f"💼 Fixed: <b>{fixed:,} UZS</b>\n"
-        "━━━━━━━━━━━━━━\n"
-        f"✅ <b>Jami: {fixed + bonus:,} UZS</b>"
-    )
-
-    if dash_id:
+    if len(bot_messages[uid]) > 2:
+        old = bot_messages[uid].pop(0)
         try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=dash_id,
-                text=text,
-                reply_markup=kb_main(),
-                parse_mode="HTML"
-            )
-            return
+            await bot.delete_message(msg.chat.id, old)
         except:
             pass
 
-    msg = await bot.send_message(
-        chat_id,
-        text,
-        reply_markup=kb_main(),
-        parse_mode="HTML"
+def main_menu():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("📊 Bugungi hisobot", "📅 3 kunlik hisobot")
+    kb.add("📆 Haftalik hisobot", "📊 Grafik")
+    kb.add("🏆 TOP")
+    kb.add("⚙️ Sozlamalar")
+    return kb
+
+# ================= WORK WEEK =================
+def get_work_week(dt):
+    if dt.weekday() == 4 and (dt.hour > 23 or (dt.hour == 23 and dt.minute >= 30)):
+        dt += timedelta(days=1)
+
+    days_from_saturday = (dt.weekday() - 5) % 7
+    week_start = dt - timedelta(days=days_from_saturday)
+    year, week, _ = week_start.isocalendar()
+    return f"{year}-W{week:02d}"
+
+# ================= START =================
+@dp.message_handler(commands=["start"])
+async def start(msg):
+    text = (
+        "ℹ️ Ushbu bot ofitsiantlar ish haqqini hisoblash uchun.\n\n"
+        "• Chekdan faqat OXIRGI ИТОГО/JAMI olinadi\n"
+        "• Ustiga chizilgan narxlar hisoblanmaydi\n"
+        "• Oddiy yozilgan raqamlar olinadi\n"
+        "• Ish haftasi: Shanba → Juma 23:30\n\n"
+        "👨‍💻 by: @Shakhzod_2105"
     )
-    cur.execute("UPDATE users SET dashboard_msg=? WHERE user_id=?", (msg.message_id, user_id))
-    db.commit()
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add("▶️ Davom etish")
+    await send_clean(msg, text, kb)
 
-# ================= CALLBACKS =================
-@dp.callback_query_handler(lambda c: c.data == "today")
-async def cb_today(call: types.CallbackQuery):
-    await show_dashboard(call.from_user.id, call.message.chat.id)
+@dp.message_handler(lambda m: m.text == "▶️ Davom etish")
+async def cont(msg):
+    cur.execute("SELECT name FROM users WHERE user_id=?", (msg.from_user.id,))
+    if cur.fetchone():
+        await send_clean(msg, "👋 Xush kelibsan!", main_menu())
+    else:
+        user_step[msg.from_user.id] = "name"
+        await send_clean(msg, "👤 Isming nima?")
 
-@dp.callback_query_handler(lambda c: c.data == "week")
-async def cb_week(call: types.CallbackQuery):
-    await call.answer("📆 Haftalik hisobot tez kunda 👌", show_alert=True)
+# ================= REGISTRATION =================
+@dp.message_handler(lambda m: user_step.get(m.from_user.id) == "name")
+async def reg_name(msg):
+    cur.execute("INSERT OR REPLACE INTO users (user_id, name) VALUES (?,?)",
+                (msg.from_user.id, msg.text))
+    conn.commit()
+    user_step[msg.from_user.id] = "branch"
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add("🏢 AKSU Shedevr", "🏢 AKSU Chigatoy")
+    await send_clean(msg, "🏢 Filialni tanla:", kb)
 
-@dp.callback_query_handler(lambda c: c.data == "graph")
-async def cb_graph(call: types.CallbackQuery):
-    await call.answer("📈 Grafik keyingi bosqichda qo‘shiladi", show_alert=True)
+@dp.message_handler(lambda m: user_step.get(m.from_user.id) == "branch")
+async def reg_branch(msg):
+    cur.execute("UPDATE users SET branch=? WHERE user_id=?",
+                (msg.text, msg.from_user.id))
+    conn.commit()
+    user_step[msg.from_user.id] = "fixed"
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add("120000", "150000", "170000")
+    await send_clean(msg, "💼 Fixed ish haqqi:", kb)
 
-@dp.callback_query_handler(lambda c: c.data == "settings")
-async def cb_settings(call: types.CallbackQuery):
-    await call.message.edit_reply_markup(kb_settings())
+@dp.message_handler(lambda m: user_step.get(m.from_user.id) == "fixed")
+async def reg_fixed(msg):
+    cur.execute("UPDATE users SET fixed=? WHERE user_id=?",
+                (int(msg.text), msg.from_user.id))
+    conn.commit()
+    user_step[msg.from_user.id] = "percent"
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add("0.7", "1", "3", "5")
+    await send_clean(msg, "📊 Foizni tanla:", kb)
 
-@dp.callback_query_handler(lambda c: c.data == "back")
-async def cb_back(call: types.CallbackQuery):
-    await call.message.edit_reply_markup(kb_main())
+@dp.message_handler(lambda m: user_step.get(m.from_user.id) == "percent")
+async def reg_percent(msg):
+    percent_map = {"0.7": 0.007, "1": 0.01, "3": 0.03, "5": 0.05}
+    cur.execute("UPDATE users SET percent=? WHERE user_id=?",
+                (percent_map[msg.text], msg.from_user.id))
+    conn.commit()
+    user_step.pop(msg.from_user.id, None)
+    await send_clean(msg, "✅ Profil tayyor!", main_menu())
 
-@dp.callback_query_handler(lambda c: c.data == "reset")
-async def cb_reset(call: types.CallbackQuery):
-    cur.execute("DELETE FROM sales WHERE user_id=?", (call.from_user.id,))
-    db.commit()
-    await call.answer("♻️ Hisob tozalandi", show_alert=True)
-    await show_dashboard(call.from_user.id, call.message.chat.id)
-
-@dp.callback_query_handler(lambda c: c.data == "rereg")
-async def cb_rereg(call: types.CallbackQuery):
-    cur.execute("DELETE FROM users WHERE user_id=?", (call.from_user.id,))
-    cur.execute("DELETE FROM sales WHERE user_id=?", (call.from_user.id,))
-    db.commit()
-    user_state[call.from_user.id] = "name"
-    await call.message.edit_text("👤 Ismingizni yozing:")
-
-# ================= GROUP SALES =================
+# ================= SAVE SALES (ENG MUHIM) =================
 @dp.message_handler(lambda m: m.chat.type in ["group", "supergroup"] and m.text)
-async def group_sale(msg: types.Message):
-    text = msg.text.replace(" ", "")
-    if text.isdigit():
-        amount = int(text)
-        if amount > 10000:
-            cur.execute(
-                "INSERT INTO sales VALUES (?,?,?)",
-                (msg.from_user.id, amount, datetime.now(TZ).strftime("%Y-%m-%d"))
-            )
-            db.commit()
+async def save_sale(msg):
+    text = remove_strikethrough(msg.text)
+    amount = None
+
+    total_line = None
+    for line in text.splitlines():
+        if re.match(r"^\s*(Итого|ИТОГО|Итог|Jami)\b", line, re.I):
+            total_line = line
+
+    if total_line:
+        nums = re.findall(r"\d[\d\s]*", total_line)
+        if nums:
+            amount = int(nums[-1].replace(" ", ""))
+
+    if amount is None:
+        clean = text.replace(" ", "")
+        if clean.isdigit():
+            amount = int(clean)
+
+    if not amount or amount < MIN_AMOUNT:
+        return
+
+    now = datetime.now(TZ)
+    cur.execute(
+        "INSERT INTO sales VALUES (?,?,?,?,?)",
+        (msg.chat.id, msg.from_user.id, amount,
+         now.strftime("%Y-%m-%d"), get_work_week(now))
+    )
+    conn.commit()
+
+# ================= REPORTS =================
+async def send_report(msg, mode):
+    uid = msg.from_user.id
+    now = datetime.now(TZ)
+
+    if mode == "today":
+        where, params, title = "date=?", (now.strftime("%Y-%m-%d"),), "📊 Bugungi hisobot"
+    elif mode == "3":
+        since = (now - timedelta(days=2)).strftime("%Y-%m-%d")
+        where, params, title = "date>=?", (since,), "📅 3 kunlik hisobot"
+    else:
+        ww = get_work_week(now)
+        where, params, title = "work_week=?", (ww,), "📆 Haftalik hisobot"
+
+    cur.execute(f"SELECT SUM(amount) FROM sales WHERE user_id=? AND {where}",
+                (uid, *params))
+    total = cur.fetchone()[0] or 0
+
+    cur.execute("SELECT name, fixed, percent FROM users WHERE user_id=?", (uid,))
+    name, fixed, percent = cur.fetchone()
+
+    bonus = int(total * percent)
+    jami = fixed + bonus
+
+    await send_clean(
+        msg,
+        f"{title}\n\n"
+        f"📅 Sana: {now.strftime('%d-%m-%Y')}\n"
+        f"⏰ Vaqt: {now.strftime('%H:%M')}\n\n"
+        f"👤 {name}\n"
+        f"💰 Savdo: {total:,} UZS\n"
+        f"📊 Foiz: {bonus:,} UZS\n"
+        f"💼 Fixed: {fixed:,} UZS\n"
+        f"✅ Jami: {jami:,} UZS",
+        main_menu()
+    )
+
+@dp.message_handler(lambda m: m.text == "📊 Bugungi hisobot")
+async def r1(msg): await send_report(msg, "today")
+
+@dp.message_handler(lambda m: m.text == "📅 3 kunlik hisobot")
+async def r2(msg): await send_report(msg, "3")
+
+@dp.message_handler(lambda m: m.text == "📆 Haftalik hisobot")
+async def r3(msg): await send_report(msg, "week")
 
 # ================= RUN =================
 if __name__ == "__main__":
