@@ -71,7 +71,7 @@ def main_menu():
 
 # ================= ISH HAFTASI =================
 def get_work_week(dt: datetime):
-    # Juma 23:30 dan keyin — yangi hafta
+    # Juma 23:30 dan keyin — yangi ish haftasi
     if dt.weekday() == 4 and (dt.hour > 23 or (dt.hour == 23 and dt.minute >= 30)):
         dt += timedelta(days=1)
 
@@ -82,23 +82,39 @@ def get_work_week(dt: datetime):
     year, week, _ = week_start.isocalendar()
     return f"{year}-W{week:02d}"
 
-# ================= START + BANNER =================
+# ================= INTRO / BANNER =================
 @dp.message_handler(commands=["start"])
 async def start(msg: types.Message):
-    banner = (
-        "💼 Ushbu bot ofitsiantlar ish haqqini hisoblash kalkulyatori\n"
-        "maqsadida foydalanish uchun yaratilgan.\n\n"
-        "by: @Shakhzod_2105"
+    intro = (
+        "ℹ️ Ushbu bot nima qiladi?\n\n"
+        "Bu bot ofitsiantlar ish haqqini hisoblashni avtomatlashtirish\n"
+        "uchun mo‘ljallangan.\n\n"
+        "• Guruhdagi cheklardan faqat yakuniy (Итого) summani oladi\n"
+        "• Qo‘lda yozilgan toza summalarni hisobga qo‘shadi\n"
+        "• Ish haftasini shanbadan jumaga (23:30 gacha) hisoblaydi\n"
+        "• Kunlik, 3 kunlik va haftalik hisobot chiqaradi\n"
+        "• TOP ofitsiantlar reytingini ko‘rsatadi\n\n"
+        "Bot restoran jamoasi uchun qulay va aniq hisob-kitob\n"
+        "olib borish maqsadida yaratilgan.\n\n"
+        "👨‍💻 Muallif: @Shakhzod_2105"
     )
 
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add("▶️ Davom etish")
+
+    await send_clean(msg, intro, kb)
+
+# ================= CONTINUE AFTER INTRO =================
+@dp.message_handler(lambda m: m.text == "▶️ Davom etish")
+async def after_intro(msg):
     cur.execute("SELECT name FROM users WHERE user_id=?", (msg.from_user.id,))
     u = cur.fetchone()
 
     if u:
-        await send_clean(msg, f"{banner}\n\n👋 Xush kelibsan, {u[0]}!", main_menu())
+        await send_clean(msg, f"👋 Xush kelibsan, {u[0]}!", main_menu())
     else:
         user_step[msg.from_user.id] = "name"
-        await send_clean(msg, f"{banner}\n\n👤 Isming nima?")
+        await send_clean(msg, "👤 Isming nima?")
 
 # ================= REGISTRATION =================
 @dp.message_handler(lambda m: user_step.get(m.from_user.id) == "name")
@@ -158,16 +174,18 @@ async def save_sale(msg: types.Message):
     text = msg.text.strip()
     amount = None
 
-    # Faqat Итого / Jami
+    # ИТОГО / JAMI → oxirgi summani olish
     match = re.search(
         r"(Итого|ИТОГО|Итог|Jami)\s*[:\-]?\s*([\d\s]+)",
         text,
         re.IGNORECASE
     )
     if match:
-        amount = int(match.group(2).replace(" ", ""))
+        numbers = re.findall(r"\d[\d\s]*", match.group(2))
+        if numbers:
+            amount = int(numbers[-1].replace(" ", ""))
 
-    # Yoki faqat toza raqam
+    # Agar yo‘q bo‘lsa → faqat toza raqam
     if amount is None:
         clean = text.replace(" ", "")
         if clean.isdigit():
@@ -288,11 +306,7 @@ async def settings(msg):
     kb.add("🗑 Barcha savdoni tozalash")
     kb.add("⬅️ Ortga")
 
-    await send_clean(
-        msg,
-        f"⚙️ Sozlamalar\nLeaderboard: {status}",
-        kb
-    )
+    await send_clean(msg, f"⚙️ Sozlamalar\nLeaderboard: {status}", kb)
 
 @dp.message_handler(lambda m: m.text == "👁 Leaderboardni yoq/o‘chir")
 async def toggle_lb(msg):
@@ -303,43 +317,15 @@ async def toggle_lb(msg):
     conn.commit()
     await settings(msg)
 
-# ===== QAYTA RO‘YXATDAN O‘TISH =====
 @dp.message_handler(lambda m: m.text == "🔄 Qayta ro‘yxatdan o‘tish")
-async def re_register_confirm(msg):
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add("✅ Ha, qayta ro‘yxatdan o‘taman")
-    kb.add("❌ Yo‘q")
-
-    await send_clean(
-        msg,
-        "⚠️ Diqqat!\n\n"
-        "Qayta ro‘yxatdan o‘tsangiz:\n"
-        "• Profil butunlay o‘chadi\n"
-        "• Savdolar saqlanib qoladi\n\n"
-        "Davom etamizmi?",
-        kb
-    )
-
-@dp.message_handler(lambda m: m.text == "✅ Ha, qayta ro‘yxatdan o‘taman")
-async def re_register_yes(msg):
+async def re_register(msg):
     cur.execute("DELETE FROM users WHERE user_id=?", (msg.from_user.id,))
     conn.commit()
-
-    user_step.pop(msg.from_user.id, None)
     user_step[msg.from_user.id] = "name"
+    await send_clean(msg, "♻️ Qayta ro‘yxatdan o‘tish boshlandi.\n\n👤 Isming nima?")
 
-    await send_clean(
-        msg,
-        "♻️ Qayta ro‘yxatdan o‘tish boshlandi.\n\n👤 Isming nima?"
-    )
-
-@dp.message_handler(lambda m: m.text == "❌ Yo‘q")
-async def re_register_no(msg):
-    await send_clean(msg, "⬅️ Bekor qilindi", main_menu())
-
-# ===== SAVDOLARINI TOZALASH =====
 @dp.message_handler(lambda m: m.text == "🗑 Barcha savdoni tozalash")
-async def reset_all(msg):
+async def reset_sales(msg):
     cur.execute("DELETE FROM sales WHERE user_id=?", (msg.from_user.id,))
     conn.commit()
     await send_clean(msg, "✅ Barcha savdolar o‘chirildi.", main_menu())
